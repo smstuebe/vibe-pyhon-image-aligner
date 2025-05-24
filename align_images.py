@@ -17,11 +17,8 @@ logging.basicConfig(
     ]
 )
 
-# Calculate optimal number of processes based on cores
 def get_optimal_process_count():
-    cpu_count = multiprocessing.cpu_count()
-    # Use one less than total cores to avoid system overload
-    return max(1, cpu_count - 1)
+    return multiprocessing.cpu_count()
 
 def resize_image(image, target_width=1280):
     """Resize image to target width while maintaining aspect ratio"""
