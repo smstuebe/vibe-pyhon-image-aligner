@@ -6,6 +6,7 @@ import multiprocessing
 import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
+import re
 
 # Configure logging
 logging.basicConfig(
@@ -32,6 +33,64 @@ def resize_image(image, target_width=1280):
         new_size = (int(w*scale), int(h*scale))
         return cv2.resize(image, new_size, interpolation=cv2.INTER_AREA), scale
     return image, 1.0
+
+def add_day_label(image, filename, base_date="20250521"):
+    """
+    Add day number label to the bottom left corner of the image
+    Calculates days relative to a base date (first day is Day 1)
+    """
+    # Extract date from filename (assuming format contains date YYYYMMDD)
+    date_match = re.search(r'(\d{8})', filename)
+    
+    if date_match:
+        date_str = date_match.group(1)
+        try:
+            # Extract day number from date
+            year = int(date_str[:4])
+            month = int(date_str[4:6])
+            day = int(date_str[6:8])
+            
+            # Extract base date components
+            base_year = int(base_date[:4])
+            base_month = int(base_date[4:6])
+            base_day = int(base_date[6:8])
+            
+            # Calculate day difference
+            import datetime
+            current_date = datetime.date(year, month, day)
+            base_date_obj = datetime.date(base_year, base_month, base_day)
+            day_diff = (current_date - base_date_obj).days + 1  # +1 so first day is Day 1
+            
+            label = f"Day {day_diff}"
+        except Exception as e:
+            # Fallback if date calculation fails
+            logging.warning(f"Failed to calculate day number: {e}")
+            label = filename
+    else:
+        # Fallback if no date pattern found
+        label = filename
+      # Add text to the image
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.8
+    font_thickness = 2
+    font_color = (255, 255, 255)  # White color
+    
+    # Add black outline for better visibility
+    outline_color = (0, 0, 0)
+    outline_thickness = 3
+    
+    # Position text in bottom left with padding
+    h, w = image.shape[:2]
+    x_pos = 20
+    y_pos = h - 30  # 30px from bottom
+    
+    # Draw outline by placing text multiple times with offsets
+    cv2.putText(image, label, (x_pos, y_pos), font, font_scale, outline_color, outline_thickness)
+    
+    # Draw the main text
+    cv2.putText(image, label, (x_pos, y_pos), font, font_scale, font_color, font_thickness)
+    
+    return image
 
 def process_single_image(args):
     """
@@ -102,10 +161,12 @@ def process_single_image(args):
         
         # Find homography
         H, mask = cv2.findHomography(current_points, ref_points, cv2.RANSAC, 5.0)
-        
-        # Apply transformation
+          # Apply transformation
         h, w = reference_img.shape[:2]
         aligned_img = cv2.warpPerspective(current_img, H, (w, h))
+        
+        # Add day label to the image
+        aligned_img = add_day_label(aligned_img, image_file)
         
         # Save aligned image
         output_path = os.path.join(output_folder, image_file)
@@ -147,6 +208,8 @@ def align_images(images_folder, output_folder):
     # Resize reference image for output
     reference_img_resized, scale = resize_image(reference_img)
     logging.info(f"Resized reference image from {reference_img.shape[1]}x{reference_img.shape[0]} to {reference_img_resized.shape[1]}x{reference_img_resized.shape[0]}")
+      # Add day label to reference image (Day 1)
+    reference_img_resized = add_day_label(reference_img_resized, image_files[0])
     
     # Save reference image to output folder
     ref_output_path = os.path.join(output_folder, image_files[0])
