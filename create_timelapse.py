@@ -146,9 +146,9 @@ if __name__ == "__main__":
     images_folder = base_dir / "processed"
     
     # Create standard timelapse
-    output_standard = base_dir / "tomato_timelapse.mp4"
+    output_standard = base_dir / "timelapse.mp4"
     create_timelapse(str(images_folder), str(output_standard), fps=1)
     
     # Create smooth transition timelapse
-    output_smooth = base_dir / "tomato_timelapse_smooth.mp4"
+    output_smooth = base_dir / "timelapse_smooth.mp4"
     create_slow_motion_transition(str(images_folder), str(output_smooth), fps=30, transition_frames=60)
