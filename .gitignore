@@ -1,0 +1,35 @@
+# Virtual Environment
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Log files
+*.log
+
+# Environment variables
+.env
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# VS Code settings
+.vscode/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Output artifacts
+processed/
+output/
+
+# Images
+img/
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.tiff
