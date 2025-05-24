@@ -2,6 +2,9 @@ import os
 import cv2
 import numpy as np
 import logging
+import multiprocessing
+import time
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 # Configure logging
@@ -14,9 +17,114 @@ logging.basicConfig(
     ]
 )
 
+# Calculate optimal number of processes based on cores
+def get_optimal_process_count():
+    cpu_count = multiprocessing.cpu_count()
+    # Use one less than total cores to avoid system overload
+    return max(1, cpu_count - 1)
+
+def resize_image(image, target_width=1280):
+    """Resize image to target width while maintaining aspect ratio"""
+    h, w = image.shape[:2]
+    
+    # Calculate scale to maintain aspect ratio but limit to target dimensions
+    scale = min(target_width / w, 720 / h)
+    
+    # Only resize if the image is larger than target
+    if scale < 1:
+        new_size = (int(w*scale), int(h*scale))
+        return cv2.resize(image, new_size, interpolation=cv2.INTER_AREA), scale
+    return image, 1.0
+
+def process_single_image(args):
+    """
+    Process a single image for alignment
+    
+    Args:
+        args: Tuple containing (image_file, images_folder, output_folder, reference_img_path)
+    """
+    image_file, images_folder, output_folder, reference_img_path = args
+    
+    try:
+        # Load reference image
+        reference_img = cv2.imread(reference_img_path)
+        
+        # Resize reference image to 720p equivalent for faster processing
+        reference_img, ref_scale = resize_image(reference_img)
+        
+        reference_gray = cv2.cvtColor(reference_img, cv2.COLOR_BGR2GRAY)
+        feature_detector = cv2.SIFT_create()
+        reference_keypoints, reference_descriptors = feature_detector.detectAndCompute(reference_gray, None)
+        
+        current_path = os.path.join(images_folder, image_file)
+        
+        # Read current image
+        current_img = cv2.imread(current_path)
+        if current_img is None:
+            logging.error(f"Could not read image: {current_path}")
+            return False
+        
+        # Resize current image to same scale for consistent alignment
+        current_img, curr_scale = resize_image(current_img)
+        
+        # Convert to grayscale
+        current_gray = cv2.cvtColor(current_img, cv2.COLOR_BGR2GRAY)
+        
+        # Detect features
+        current_keypoints, current_descriptors = feature_detector.detectAndCompute(current_gray, None)
+        if len(current_keypoints) < 10:
+            logging.warning(f"Too few keypoints detected in {image_file}, skipping alignment.")
+            # Save unmodified image (but resized)
+            output_path = os.path.join(output_folder, image_file)
+            cv2.imwrite(output_path, current_img)
+            return False
+        
+        # Create feature matcher
+        matcher = cv2.BFMatcher()
+        
+        # Match features between reference and current image
+        matches = matcher.knnMatch(reference_descriptors, current_descriptors, k=2)
+        
+        # Apply Lowe's ratio test to filter good matches
+        good_matches = []
+        for m, n in matches:
+            if m.distance < 0.75 * n.distance:
+                good_matches.append(m)
+        
+        # Need at least 4 good matches to estimate homography
+        if len(good_matches) < 4:
+            logging.warning(f"Not enough good matches in {image_file}, skipping alignment.")
+            # Save unmodified image (but resized)
+            output_path = os.path.join(output_folder, image_file)
+            cv2.imwrite(output_path, current_img)
+            return False
+            
+        # Extract location of good matches
+        ref_points = np.float32([reference_keypoints[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+        current_points = np.float32([current_keypoints[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+        
+        # Find homography
+        H, mask = cv2.findHomography(current_points, ref_points, cv2.RANSAC, 5.0)
+        
+        # Apply transformation
+        h, w = reference_img.shape[:2]
+        aligned_img = cv2.warpPerspective(current_img, H, (w, h))
+        
+        # Save aligned image
+        output_path = os.path.join(output_folder, image_file)
+        cv2.imwrite(output_path, aligned_img)
+        
+        logging.info(f"Saved aligned image: {image_file}")
+        return True
+        
+    except Exception as e:
+        logging.error(f"Error processing {image_file}: {str(e)}")
+        return False
+
 def align_images(images_folder, output_folder):
     """
     Aligns a sequence of images based on feature matching and saves them to the output folder.
+    Uses parallel processing to utilize all CPU cores.
     """
     # Create output folder if it doesn't exist
     os.makedirs(output_folder, exist_ok=True)
@@ -30,7 +138,8 @@ def align_images(images_folder, output_folder):
         return
     
     logging.info(f"Found {len(image_files)} images to process.")
-      # Read the first image as the reference image
+    
+    # Read the first image as the reference image
     reference_path = os.path.join(images_folder, image_files[0])
     reference_img = cv2.imread(reference_path)
     
@@ -38,75 +147,37 @@ def align_images(images_folder, output_folder):
         logging.error(f"Could not read reference image: {reference_path}")
         return
     
+    # Resize reference image for output
+    reference_img_resized, scale = resize_image(reference_img)
+    logging.info(f"Resized reference image from {reference_img.shape[1]}x{reference_img.shape[0]} to {reference_img_resized.shape[1]}x{reference_img_resized.shape[0]}")
+    
     # Save reference image to output folder
     ref_output_path = os.path.join(output_folder, image_files[0])
-    cv2.imwrite(ref_output_path, reference_img)
+    cv2.imwrite(ref_output_path, reference_img_resized)
     logging.info(f"Saved reference image: {os.path.basename(ref_output_path)}")
     
-    # Convert reference image to grayscale for feature detection
-    reference_gray = cv2.cvtColor(reference_img, cv2.COLOR_BGR2GRAY)
+    # Get optimal number of workers
+    num_workers = get_optimal_process_count()
+    logging.info(f"Using {num_workers} workers for parallel processing")
     
-    # Initialize feature detector (SIFT works well for feature detection)
-    feature_detector = cv2.SIFT_create()
+    # Prepare data for parallel processing (skip the reference image)
+    tasks = [(image_files[i], images_folder, output_folder, reference_path) 
+             for i in range(1, len(image_files))]
     
-    # Detect features in reference image
-    reference_keypoints, reference_descriptors = feature_detector.detectAndCompute(reference_gray, None)
-      # Create feature matcher
-    matcher = cv2.BFMatcher()
+    # Process images in parallel using optimized number of workers
+    start_time = time.time()
+    successful = 0
+    if tasks:
+        # Explicitly setting max_workers and using chunksize for better workload distribution
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            # Use a smaller chunk size for better load balancing
+            chunksize = max(1, len(tasks) // (num_workers * 2))
+            results = list(executor.map(process_single_image, tasks, chunksize=chunksize))
+            successful = results.count(True)
     
-    # Process each image after the reference
-    for i in range(1, len(image_files)):
-        current_path = os.path.join(images_folder, image_files[i])
-        logging.info(f"Processing image {i}/{len(image_files)-1}: {image_files[i]}...")
-        
-        # Read current image
-        current_img = cv2.imread(current_path)
-        if current_img is None:
-            logging.error(f"Could not read image: {current_path}")
-            continue
-          # Convert to grayscale
-        current_gray = cv2.cvtColor(current_img, cv2.COLOR_BGR2GRAY)
-        
-        # Detect features
-        current_keypoints, current_descriptors = feature_detector.detectAndCompute(current_gray, None)
-        if len(current_keypoints) < 10:
-            logging.warning(f"Too few keypoints detected in {image_files[i]}, skipping alignment.")
-            # Save unmodified image
-            output_path = os.path.join(output_folder, image_files[i])
-            cv2.imwrite(output_path, current_img)
-            continue
-          # Match features between reference and current image
-        matches = matcher.knnMatch(reference_descriptors, current_descriptors, k=2)
-        
-        # Apply Lowe's ratio test to filter good matches
-        good_matches = []
-        for m, n in matches:
-            if m.distance < 0.75 * n.distance:
-                good_matches.append(m)
-        # Need at least 4 good matches to estimate homography
-        if len(good_matches) < 4:
-            logging.warning(f"Not enough good matches in {image_files[i]}, skipping alignment.")
-            # Save unmodified image
-            output_path = os.path.join(output_folder, image_files[i])
-            cv2.imwrite(output_path, current_img)
-            continue
-        
-        # Extract location of good matches
-        ref_points = np.float32([reference_keypoints[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-        current_points = np.float32([current_keypoints[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-          # Find homography
-        H, mask = cv2.findHomography(current_points, ref_points, cv2.RANSAC, 5.0)
-        
-        # Apply transformation
-        h, w = reference_img.shape[:2]
-        aligned_img = cv2.warpPerspective(current_img, H, (w, h))
-        # Save aligned image
-        output_path = os.path.join(output_folder, image_files[i])
-        cv2.imwrite(output_path, aligned_img)
-        
-        logging.info(f"Saved aligned image: {os.path.basename(output_path)}")
-    
-    logging.info("Image alignment complete!")
+    end_time = time.time()
+    processing_time = end_time - start_time
+    logging.info(f"Image alignment complete! Successfully aligned {successful} out of {len(tasks)} images in {processing_time:.2f} seconds.")
 
 if __name__ == "__main__":
     base_dir = Path(__file__).parent
@@ -116,7 +187,6 @@ if __name__ == "__main__":
     logging.info(f"Aligning images from '{images_folder}' to '{output_folder}'")
     logging.info(f"Current directory: {os.getcwd()}")
     logging.info(f"Looking for images in: {os.path.abspath(str(images_folder))}")
-    logging.info(f"Image folder exists: {os.path.exists(str(images_folder))}")
     
     if os.path.exists(str(images_folder)):
         logging.info(f"Contents of image folder: {os.listdir(str(images_folder))}")
