@@ -33,3 +33,10 @@ img/
 *.gif
 *.bmp
 *.tiff
+
+# Videos
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wmv
